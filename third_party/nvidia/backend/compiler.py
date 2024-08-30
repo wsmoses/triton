@@ -171,6 +171,14 @@ class CUDABackend(BaseBackend):
         passes.common.add_licm(pm)
         passes.common.add_symbol_dce(pm)
         pm.run(mod)
+
+        pattern = r"tt.func public @(\w+)\(.+"
+        matches = re.findall(pattern, str(mod))
+        assert len(matches) == 1
+        name = matches[0]
+
+        Path(f'{os.environ.get(f"TRITON_IR_PATH", "")}/{name}.mlir').write_text(str(mod))
+
         return mod
 
     @staticmethod
