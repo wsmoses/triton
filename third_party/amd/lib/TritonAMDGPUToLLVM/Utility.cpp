@@ -231,9 +231,11 @@ Value llLoad(RewriterBase &rewriter, Location loc, Value ptr, Type elemTy,
   auto funcName = mangleFunc(getLoadNameRaw(cm), funcType);
   LLVM::LLVMFuncOp funcOp =
       appendOrGetExternFuncOp(rewriter, parent, funcName, funcType);
-  return LLVM::createLLVMCallOp(rewriter, loc, funcOp,
-                                ValueRange({ptr, pred, falseVal}))
-      .getResult();
+  auto loadVal =
+      rewriter
+          .create<LLVM::CallOp>(loc, funcOp, ValueRange({ptr, pred, falseVal}))
+          .getResult();
+  return loadVal;
 }
 
 void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
@@ -274,7 +276,7 @@ void llStore(RewriterBase &rewriter, Location loc, Value ptr, Value val,
   auto funcName = mangleFunc(getStoreNameRaw(cm), funcType);
   LLVM::LLVMFuncOp funcOp =
       appendOrGetExternFuncOp(rewriter, parent, funcName, funcType);
-  LLVM::createLLVMCallOp(rewriter, loc, funcOp, ValueRange({ptr, val, pred}));
+  rewriter.create<LLVM::CallOp>(loc, funcOp, ValueRange({ptr, val, pred}));
 }
 
 } // namespace mlir::LLVM::AMD

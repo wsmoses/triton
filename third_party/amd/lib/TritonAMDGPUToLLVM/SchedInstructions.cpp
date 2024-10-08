@@ -38,7 +38,7 @@ void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
                              InstructionKindMask maskValue, int sizeValue,
                              int groupIdValue) {
   MLIRContext *ctx = rewriter.getContext();
-  const char *intrinsicName = "llvm.amdgcn.sched.group.barrier";
+  auto intrinsicName = str_attr("llvm.amdgcn.sched.group.barrier");
 
   Value mask =
       LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(maskValue));
@@ -47,8 +47,10 @@ void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
   Value groupId = LLVM::createConstantI32(loc, rewriter,
                                           static_cast<int32_t>(groupIdValue));
 
-  LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName, TypeRange{},
-                                  ValueRange{mask, size, groupId});
+  LLVM::FastmathFlagsAttr defaultFlags{};
+  rewriter.create<LLVM::CallIntrinsicOp>(loc, TypeRange{}, intrinsicName,
+                                         ValueRange{mask, size, groupId},
+                                         defaultFlags);
 }
 
 // Insert intrinsic that controls the types of instructions that may be
@@ -56,25 +58,25 @@ void createSchedGroupBarrier(PatternRewriter &rewriter, Location loc,
 Operation *createSchedBarrier(PatternRewriter &rewriter, Location loc,
                               int64_t maskValue) {
   MLIRContext *ctx = rewriter.getContext();
-  const char *intrinsicName = "llvm.amdgcn.sched.barrier";
+  auto intrinsicName = str_attr("llvm.amdgcn.sched.barrier");
   LLVM::FastmathFlagsAttr defaultFlags{};
 
   Value mask =
       LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(maskValue));
-  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName,
-                                         TypeRange{}, ValueRange{mask});
+  return rewriter.create<LLVM::CallIntrinsicOp>(loc, TypeRange{}, intrinsicName,
+                                                ValueRange{mask}, defaultFlags);
 }
 
 // Insert an experimental intrinsic for instruction group level parallelism.
 // The intrinsic takes a value that specifies the strategy.
 Operation *createIglpOpt(PatternRewriter &rewriter, Location loc, int value) {
   MLIRContext *ctx = rewriter.getContext();
-  const char *intrinsicName = "llvm.amdgcn.iglp.opt";
+  auto intrinsicName = str_attr("llvm.amdgcn.iglp.opt");
   LLVM::FastmathFlagsAttr defaultFlags{};
   Value iglpValue =
       LLVM::createConstantI32(loc, rewriter, static_cast<int32_t>(value));
-  return LLVM::createLLVMIntrinsicCallOp(rewriter, loc, intrinsicName,
-                                         TypeRange{}, ValueRange{iglpValue});
+  return rewriter.create<LLVM::CallIntrinsicOp>(
+      loc, TypeRange{}, intrinsicName, ValueRange{iglpValue}, defaultFlags);
 }
 
 struct InstructionSchedHintsRewriter

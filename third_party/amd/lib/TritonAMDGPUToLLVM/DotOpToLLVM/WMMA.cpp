@@ -24,7 +24,6 @@
 #include "../PatternTritonGPUOpToLLVM.h"
 #include "Utility.h"
 #include "mlir/Dialect/LLVMIR/ROCDLDialect.h"
-#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 namespace mlir::triton::AMD {
 namespace {
@@ -220,8 +219,10 @@ Value generateWMMAIntrinsic(ConversionPatternRewriter &rewriter, Location loc,
   if (32 / dElType.getIntOrFloatBitWidth() > 1 || dElType.isInteger(32)) {
     operands.push_back(int_val(1, false));
   }
-  auto wmmaIntrinsic = LLVM::createLLVMIntrinsicCallOp(
-      rewriter, loc, name, valC.getType(), operands);
+  auto wmmaIntrinsic = rewriter.create<mlir::LLVM::CallIntrinsicOp>(
+      loc, TypeRange{valC.getType()}, StringAttr::get(loc.getContext(), name),
+      operands, defaultFlags);
+
   return wmmaIntrinsic.getResult(0);
 }
 

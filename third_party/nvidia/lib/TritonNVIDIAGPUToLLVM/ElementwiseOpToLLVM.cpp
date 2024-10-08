@@ -5,7 +5,6 @@
 #include "mlir/Support/LLVM.h"
 #include "triton/Conversion/TritonGPUToLLVM/ElementwiseOpToLLVMBase.h"
 #include "triton/Conversion/TritonGPUToLLVM/PatternTritonGPUOpToLLVM.h"
-#include "triton/Conversion/TritonGPUToLLVM/Utility.h"
 
 using namespace mlir::triton::gpu;
 
@@ -913,7 +912,7 @@ struct OpToExternCallConversion
     LLVM::LLVMFuncOp funcOp =
         appendOrGetExternFuncOp(rewriter, op, funcName, funcType);
     return {
-        LLVM::createLLVMCallOp(rewriter, loc, funcOp, operands[0]).getResult()};
+        rewriter.create<LLVM::CallOp>(loc, funcOp, operands[0]).getResult()};
   }
 
 private:
