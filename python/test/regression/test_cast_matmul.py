@@ -13,6 +13,11 @@ import triton
 import triton.language as tl
 
 input_dtypes = ["float16", "float32", "float64"]
+if triton.runtime.driver.active.get_current_target().backend == "cuda":
+    input_dtypes += ["int8", "float8_e5m2"]
+    cc = torch.cuda.get_device_capability(0)
+    if cc >= (8, 9):
+        input_dtypes += ["float8_e4m3fn"]
 out_dtypes = ["float16", "float32"]
 
 
@@ -65,7 +70,7 @@ def matmul_kernel(A, B, C, M, N, K,  #
 
 @pytest.mark.parametrize("M, K, N, w_dtype, x_dtype, out_dtype",
                          [(M, K, N, w, x, o)  #
-                          for (M, K, N) in [(128, 128, 128), (1280, 768, 1024)]  #
+                          for (M, K, N) in [(128, 128, 128), (768, 768, 1024)]  #
                           for w in input_dtypes
                           for x in input_dtypes  #
                           for o in out_dtypes])
@@ -73,17 +78,37 @@ def test_cast_matmul(M, K, N, w_dtype, x_dtype, out_dtype):
     if x_dtype == w_dtype:
         pytest.skip("skip the same input dtype")
     device = torch.cuda.current_device()
-    x_dtype = getattr(torch, x_dtype)
-    w_dtype = getattr(torch, w_dtype)
-    a = torch.randn((M, K), device=device, dtype=x_dtype)
-    b = torch.randn((K, N), device=device, dtype=w_dtype)
+    x_dtype: torch.dtype = getattr(torch, x_dtype)
+    w_dtype: torch.dtype = getattr(torch, w_dtype)
+
+    def init_tensor(dtype, shape):
+        if dtype == torch.int8:
+            return torch.randint(0, 3, shape, device=device, dtype=dtype)
+        elif dtype == torch.float8_e4m3fn or dtype == torch.float8_e5m2:
+            return torch.randn(shape, device=device, dtype=torch.float16).to(dtype)
+        else:
+            t = torch.randn(shape, device=device, dtype=dtype)
+            if dtype == torch.float16:
+                int_tensor = t.view(torch.int16)
+                int_tensor = int_tensor & 0xFC00
+                t = int_tensor.view(dtype)
+            elif dtype == torch.float32:
+                int_tensor = t.view(torch.int32)
+                int_tensor = int_tensor & 0xFF800000
+                t = int_tensor.view(dtype)
+            return t
+
+    torch.manual_seed(42)
+    a = init_tensor(w_dtype, (M, K))
+    b = init_tensor(x_dtype, (K, N))
+
     torch_dtype = getattr(torch, out_dtype)
     triton_dtype = getattr(tl, out_dtype)  # <- here force dot_out_dtype
     out_torch = torch.matmul(a.to(torch_dtype), b.to(torch_dtype))
     out_triton = torch.empty((M, N), device=device, dtype=torch_dtype)
 
     # launch kernel
-    BLOCK_M, BLOCK_N, BLOCK_K = 16, 16, 32
+    BLOCK_M, BLOCK_N, BLOCK_K = 64, 128, 32
     grid = ((triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N)), 1)
 
     matmul_kernel[grid](
@@ -96,4 +121,4 @@ def test_cast_matmul(M, K, N, w_dtype, x_dtype, out_dtype):
         BLOCK_N=BLOCK_N,  #
         BLOCK_K=BLOCK_K)
 
-    torch.testing.assert_close(out_torch, out_triton, atol=0.3, rtol=0.01)
+    torch.testing.assert_close(out_torch, out_triton, atol=0, rtol=0)
