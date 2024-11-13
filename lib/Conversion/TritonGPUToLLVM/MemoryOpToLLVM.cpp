@@ -144,7 +144,7 @@ public:
       // - kWidth == 8
       if (auto mma = dyn_cast<NvidiaMmaEncodingAttr>(dot.getParent())) {
         bool legacyLoweringIsBuggy = dot.getKWidth() >= 8;
-        return legacyLoweringIsBuggy && mma.isAmpere();
+        return mma.isAmpere();
       }
       if (isa<AMDMfmaEncodingAttr>(dot.getParent()))
         return true;
