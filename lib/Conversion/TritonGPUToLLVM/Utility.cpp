@@ -775,6 +775,7 @@ Value mxfpScaleBf16(RewriterBase &rewriter, Location loc, Value v,
   Value scaleIsNan = icmp_eq(scale, i8_val(0xff));
   Value scaleBf16 = bitcast(shl(zext(i16_ty, scale), i16_val(7)), bf16_ty);
   Value scaledBf16 = fmul(vBf16, scaleBf16);
+  return scaledBf16;
   // Account for NaN in the scale as per the mxfp specification.
   return select(scaleIsNan, nanBf16, scaledBf16);
 };
