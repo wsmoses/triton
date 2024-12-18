@@ -296,129 +296,74 @@ void ConvertLayoutOp::getCanonicalizationPatterns(RewritePatternSet &patterns,
   patterns.add<CanonicalizeConvertFromSplit>(context);
 }
 
-LogicalResult UpcastMXFPOp::verify() {
-  auto fpType = getFpType();
+LogicalResult Fp4ToFpOp::verify() {
+  auto srcTy = cast<RankedTensorType>(getSrc().getType());
+  auto resTy = cast<RankedTensorType>(getResult().getType());
+  auto rank = srcTy.getRank();
 
-  auto xTy = getSrc().getType();
-  auto scaleTy = getScale().getType();
+  if (rank != resTy.getRank())
+    return emitError() << "source rank " << rank << " != result rank "
+                       << resTy.getRank();
 
-  if (xTy.getElementType() != FloatType::getBF16(getContext()) &&
-      xTy.getElementType() != IntegerType::get(getContext(), 8)) {
-    return emitOpError("element type of the first operand must be bf16 or i8");
-  }
+  auto srcShape = srcTy.getShape();
+  auto resShape = resTy.getShape();
+  auto axis = getAxis();
 
-  if (scaleTy.getElementType() != IntegerType::get(getContext(), 8)) {
-    return emitOpError("element type of the second operand must be uint8");
-  }
+  if (!(0 <= axis && axis < rank))
+    return emitError() << "axis " << axis << " out of range for rank " << rank;
 
-  auto xShape = xTy.getShape();
-  auto scaleShape = scaleTy.getShape();
+  if (!resTy.getElementType().isBF16())
+    return emitError() << "only bf16 is supported for now, got "
+                       << resTy.getElementType();
 
-  if (xShape.size() != scaleShape.size() || xShape.size() < 2) {
-    return emitOpError(
-        "operands must have the same number of dimensions, at least 2");
-  }
-
-  if (!(fpType == ScaleDotElemType::E2M1 || fpType == ScaleDotElemType::E4M3 ||
-        fpType == ScaleDotElemType::E5M2)) {
-    return emitOpError("NYI: fpType must be E2M1, E4M3, or E5M2");
-  }
-
-  auto layoutX = xTy.getEncoding();
-  auto layoutScale = scaleTy.getEncoding();
-  if (bool(layoutX) != bool(layoutScale)) {
-    return emitOpError(
-        "Expected either both or neither operands to have an encoding");
-  }
-  // Nothing to check if no encoding. This is used to infer the return type in
-  // AccelerateMatmul.cpp
-  if (!layoutX) {
-    return success();
-  }
-
-  auto dotEncoding = dyn_cast<DotOperandEncodingAttr>(layoutX);
-  if (!dotEncoding) {
-    return emitOpError("Expected a DotOperandEncodingAttr for values");
-  }
-  if (!isa<BlockedEncodingAttr, LinearEncodingAttr>(layoutScale)) {
-    return emitOpError(
-        "Expected a BlockOperandEncoding or LinearOperandEncoding "
-        "for scales");
-  }
-
-  if (isa<NvidiaMmaEncodingAttr>(dotEncoding.getParent())) {
-    // Necessary to keep all of the scales of a given block of values in the
-    // same warp
-    auto threadsPerWarp =
-        cast<DistributedEncodingTrait>(layoutScale).getThreadsPerWarp();
-    if (threadsPerWarp != ArrayRef<unsigned>({16, 2})) {
-      return emitOpError("Expected threads per warp to be {16, 2}");
+  for (int i = 0; i < rank; ++i) {
+    if (i == axis) {
+      if (resShape[i] != srcShape[i] * 2)
+        return emitError() << "axis " << axis
+                           << " dimension must be 2x source dimension (src="
+                           << srcShape[i] << ", dst=" << resShape[i] << ")";
+    } else {
+      if (resShape[i] != srcShape[i])
+        return emitError() << "dimension " << i
+                           << " mismatch (src=" << srcShape[i]
+                           << ", dst=" << resShape[i] << ", axis=" << axis
+                           << ")";
     }
   }
-
-  // Change to support fp8 types
-  const auto elemsPacked = fpType == ScaleDotElemType::E2M1 ? 2 : 1;
-  // Figure out the K dimension for the input A/B. For A/B scale, the K
-  // dimension is always the last dimension.
-  const int opIdx = dotEncoding.getOpIdx();
-  const bool hasBatch = xShape.size() == 3;
-  const int kIdx = (opIdx == 0 ? 1 : 0) + hasBatch;
-
-  if (xShape[kIdx] != (32 / elemsPacked) * scaleShape.back()) {
-    return emitOpError("K dimension of first operand must be 16 times "
-                       "larger than last/K dimension of the second operand");
-  }
-
-  // Check other dimensions match too. For input A/B, we need to figure out the
-  // index for the M/N dimension. For scale, it's always {(batch), M/N, K}.
-  const int mnIdx = (opIdx == 0 ? 0 : 1) + hasBatch;
-  if (hasBatch && xShape[0] != scaleShape[0])
-    return emitOpError("batch dimension must match between operands");
-  if (xShape[mnIdx] != scaleShape[hasBatch]) {
-    return emitOpError("M/N dimension must match between operands");
-  }
-
   return success();
 }
 
-LogicalResult UpcastMXFPOp::inferReturnTypes(
-    MLIRContext *ctx, std::optional<Location> loc, ValueRange operands,
-    DictionaryAttr attributes, OpaqueProperties opaqueProperties,
-    RegionRange regions, SmallVectorImpl<Type> &inferredReturnTypes) {
-  auto xTy = cast<RankedTensorType>(operands[0].getType());
-  auto properties = opaqueProperties.as<const Properties *>();
-  auto typeEncoded = properties->fp_type.getValue();
-  auto xShape = xTy.getShape();
+void Fp4ToFpOp::build(OpBuilder &builder, OperationState &state,
+                      TypedValue<RankedTensorType> src, Type resultElemType,
+                      int32_t axis) {
+  // Determine the location we will use for optional error reporting.
+  std::optional<::mlir::Location> loc = state.location;
 
-  auto encoding = xTy.getEncoding();
+  // Get source type as a RankedTensorType.
+  auto srcTy = src.getType();
+  auto shape = llvm::to_vector(srcTy.getShape());
+  auto rank = srcTy.getRank();
+  assert(0 <= axis && axis < rank);
+  shape[axis] *= 2;
 
-  if (typeEncoded == ScaleDotElemType::E2M1) {
-    RankedTensorType retTy;
+  // Get the source encoding, if any.
+  auto inEnc = srcTy.getEncoding();
+  Attribute outEnc;
 
-    auto newShape = SmallVector<int64_t>(xShape);
-    if (!encoding) {
-      newShape.back() *= 2;
-      retTy = RankedTensorType::get(xShape, FloatType::getBF16(ctx));
-    } else {
-      auto oldEncoding = cast<DotOperandEncodingAttr>(encoding);
-      auto newVEncoding = DotOperandEncodingAttr::get(
-          ctx, oldEncoding.getOpIdx(), oldEncoding.getParent(),
-          oldEncoding.getKWidth() * 2);
-      // Figure out the K dimension for the input A/B, given that the return
-      // type is upcasted A/B type so we need to update the proper dim size.
-      const int opIdx = oldEncoding.getOpIdx();
-      const bool hasBatch = xShape.size() == 3;
-      const int kIdx = (opIdx == 0 ? 1 : 0) + hasBatch;
-      newShape[kIdx] *= 2;
-      retTy = RankedTensorType::get(newShape, FloatType::getBF16(ctx),
-                                    newVEncoding);
-    }
-    inferredReturnTypes.push_back(retTy);
-  } else {
-    inferredReturnTypes.push_back(xTy);
-  }
+  auto result =
+      inEnc.getDialect()
+          .getRegisteredInterface<triton::DialectInferLayoutInterface>()
+          ->inferFp4ToFpOpEncoding(shape, axis, inEnc, outEnc,
+                                   /*fwdInference=*/true, state.location);
+  assert(succeeded(result));
 
-  return success();
+  // Construct the result type with the updated shape and inferred (or reused)
+  // encoding.
+  auto resultTy = mlir::RankedTensorType::get(shape, resultElemType, outEnc);
+
+  // Invoke the default builder to set up the operation state with the final
+  // type.
+  build(builder, state, resultTy, src, builder.getI32IntegerAttr(axis));
 }
 
 OpFoldResult MemDescTransOp::fold(FoldAdaptor adaptor) {

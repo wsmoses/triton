@@ -1021,7 +1021,6 @@ LogicalResult SplitOp::inferReturnTypes(
   }
   auto retTy = RankedTensorType::get(retShape, srcTy.getElementType(), retEnc);
   inferredReturnTypes.push_back(retTy);
-  inferredReturnTypes.push_back(retTy);
   return success();
 }
 
