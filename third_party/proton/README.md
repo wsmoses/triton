@@ -185,6 +185,17 @@ with proton.scope("test"):
 
 The call path of `foo1` will be `test->test1->state0`.
 
+### Thread management
+
+Proton adopts a conservative approach to manage threads.
+There are three types of threads in Proton, the main thread, the application helper thread, and the callback thread from GPU profiling substrates.
+For the former two, they have to call `libproton` to interact with proton, we provide a thread-safe API to manage the threads by explicit locks.
+For the latter, we use individual locks to protect data structures that will be accessed concurrently by multiple threads.
+
+The `shadow` context source is designed *specifically* for execution models like PyTorch, where the main thread refers to where the user starts the profiling session.
+And helper threads refer to threads spawned by the PyTorch runtime in the backward phase.
+Helper threads will inherit and shadow the main context stack with their own user-defined scopes.
+
 ### Instrumentation (experimental)
 
 In addition to profiling, Proton also incorporates MLIR/LLVM based compiler instrumentation passes to get Triton level analysis
