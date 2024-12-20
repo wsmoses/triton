@@ -336,20 +336,14 @@ LogicalResult Fp4ToFpOp::verify() {
 void Fp4ToFpOp::build(OpBuilder &builder, OperationState &state,
                       TypedValue<RankedTensorType> src, Type resultElemType,
                       int32_t axis) {
-  // Determine the location we will use for optional error reporting.
-  std::optional<::mlir::Location> loc = state.location;
-
-  // Get source type as a RankedTensorType.
   auto srcTy = src.getType();
   auto shape = llvm::to_vector(srcTy.getShape());
   auto rank = srcTy.getRank();
   assert(0 <= axis && axis < rank);
   shape[axis] *= 2;
 
-  // Get the source encoding, if any.
-  auto inEnc = srcTy.getEncoding();
+  Attribute inEnc = srcTy.getEncoding();
   Attribute outEnc;
-
   auto result =
       inEnc.getDialect()
           .getRegisteredInterface<triton::DialectInferLayoutInterface>()
@@ -357,12 +351,7 @@ void Fp4ToFpOp::build(OpBuilder &builder, OperationState &state,
                                    /*fwdInference=*/true, state.location);
   assert(succeeded(result));
 
-  // Construct the result type with the updated shape and inferred (or reused)
-  // encoding.
-  auto resultTy = mlir::RankedTensorType::get(shape, resultElemType, outEnc);
-
-  // Invoke the default builder to set up the operation state with the final
-  // type.
+  auto resultTy = RankedTensorType::get(shape, resultElemType, outEnc);
   build(builder, state, resultTy, src, builder.getI32IntegerAttr(axis));
 }
 
