@@ -504,6 +504,9 @@ assignMemoryLayouts(scf::ForOp &forOp,
         if (loadInfo.isMMAv3Shared) {
           loadInfo.sharedEncoding =
               getSharedEncoding(&op, /*loadIsMMAv3=*/true).value_or(nullptr);
+        } else if (isa<tt::ExperimentalDescriptorLoadOp>(op)) {
+          loadInfo.sharedEncoding =
+              getSharedEncoding(&op, /*loadIsMMAv3=*/true).value_or(nullptr);
         } else if (loadInfo.isMMAv3Registers || dot) {
           bool incompatible = false;
           loadInfo.sharedEncoding =
