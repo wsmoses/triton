@@ -9,6 +9,7 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Verifier.h"
 #include "mlir/Interfaces/InferTypeOpInterface.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Support/LogicalResult.h"
@@ -129,6 +130,9 @@ public:
   void cleanup();
   void backwardRematerialization();
   void backwardRematerialization(ConvertLayoutOp convertOp);
+  // TODO: Merge the three hoistConvert*(); functions as they are duplicate code
+  void hoistConvertDotOperand();
+  void hoistConvertDotOperand(ConvertLayoutOp convertOp);
   void hoistConvertOnTopOfExtOrBroadcast();
   void hoistConvertOnTopOfExtOrBroadcast(ConvertLayoutOp convertOp);
   void hoistConvertIntoConditionals();
@@ -145,6 +149,11 @@ public:
 
 private:
   void updateRematMapping(SmallVector<std::tuple<Value, Value>> &values);
+  // Allow re-using existing conversions for a value. Check dominance of any
+  // reusable materializations against the root value. This is sufficient
+  // because the conversions are processed in post-order.
+  Value getExistingConversion(OpOperand &value, Attribute encoding);
+
   // Existing tuples of (value, layout) that needs to be updated when recreating
   // scf ops. This prevents keeping track of Values that have been delete when
   // rewriting slices.
@@ -946,33 +955,34 @@ void LayoutRematerialization::rewriteSlice(SetVector<Value> &slice,
   IRMapping mapping;
   rewriteSlice(slice, layout, convertOp, mapping);
 }
+Value LayoutRematerialization::getExistingConversion(OpOperand &value,
+                                                     Attribute encoding) {
+  Value remat = getRematValue(value.get(), encoding);
+  if (!remat)
+    return Value();
+  // `value` can be replaced with an existing rematerialization if it
+  // dominates the current use of value.
+  Operation *user = value.getOwner();
+  if (domInfo.properlyDominates(remat, user)) {
+    return remat;
+  }
+  // Alternatively, if the current use can be sunk below the existing
+  // rematerialization, then it is okay to use as well. E.g. the current use
+  // is a conversion that will be folded away when its result is
+  // rematerialized.
+  if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
+      domInfo.properlyDominates(user, remat.getDefiningOp())) {
+    return remat;
+  }
+  return Value();
+};
 
 LogicalResult LayoutRematerialization::getRematerializableSlice(
     OpOperand &root, Attribute rootEncoding, SetVector<Value> &slice,
     DenseMap<Value, Attribute> &layout,
     std::function<bool(Operation *)> stopPropagation) {
-  // Allow re-using existing conversions for a value. Check dominance of any
-  // reusable materializations against the root value. This is sufficient
-  // because the conversions are processed in post-order.
-  auto getExistingConversion = [&](OpOperand &value, Attribute encoding) {
-    Value remat = getRematValue(value.get(), encoding);
-    if (!remat)
-      return Value();
-    // `value` can be replaced with an existing rematerialization if it
-    // dominates the current use of value.
-    Operation *user = value.getOwner();
-    if (domInfo.properlyDominates(remat, user)) {
-      return remat;
-    }
-    // Alternatively, if the current use can be sunk below the existing
-    // rematerialization, then it is okay to use as well. E.g. the current use
-    // is a conversion that will be folded away when its result is
-    // rematerialized.
-    if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
-        domInfo.properlyDominates(user, remat.getDefiningOp())) {
-      return remat;
-    }
-    return Value();
+  auto getExistingConversion = [this](OpOperand &value, Attribute encoding) {
+    return this->getExistingConversion(value, encoding);
   };
   LogicalResult result =
       getConvertBackwardSlice(root, slice, rootEncoding, layout,
@@ -1040,8 +1050,7 @@ void LayoutRematerialization::hoistConvertIntoConditionals() {
 
 void LayoutRematerialization::backwardRematerialization(
     ConvertLayoutOp convertOp) {
-  // we don't handle conversions to DotOperandEncodingAttr
-  // this is a heuristic to accommodate fused attention
+  // DotOperand is Hoisted by hoistDotOperandOnTopOfMovFree
   RankedTensorType targetType = convertOp.getType();
   if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
     return;
@@ -1079,12 +1088,99 @@ void LayoutRematerialization::backwardRematerialization(
   rewriteSlice(slice, layout, convertOp);
 }
 
+void LayoutRematerialization::hoistConvertDotOperand() {
+  // Go through each ConvertLayoutOp.
+  SmallVector<ConvertLayoutOp> convertOps;
+  funcOp.walk(
+      [&](ConvertLayoutOp convertOp) { convertOps.push_back(convertOp); });
+  for (ConvertLayoutOp convertOp : convertOps) {
+    hoistConvertDotOperand(convertOp);
+    if (!opToDelete.contains(convertOp)) {
+      // If the conversion didn't get removed, consider it for reuse in future
+      // backward slices.
+      addRematValue(convertOp.getSrc(), convertOp.getType().getEncoding(),
+                    convertOp.getResult());
+    }
+  }
+}
+
+void LayoutRematerialization::hoistConvertDotOperand(
+    ConvertLayoutOp convertOp) {
+  auto targetType = convertOp.getType();
+  if (!isa<DotOperandEncodingAttr>(targetType.getEncoding()))
+    return;
+
+  // We hoist over any operation that can be done without data movement between
+  // threads We do views and elementwise pure ops for now
+  // UpcastMXFPOp is here temporarily until
+  // https://github.com/triton-lang/triton/pull/5475 lands
+  auto noDataMovement = [](Operation *op) {
+    return (op->hasTrait<OpTrait::Elementwise>() && isPure(op)) ||
+           isa<BroadcastOp, ExpandDimsOp, ReshapeOp, TransOp, UpcastMXFPOp>(op);
+  };
+  // Stop the slice as soon as we find an operation that cannot be done without
+  // data movement between threads
+  auto stop = std::not_fn(noDataMovement);
+
+  SetVector<Value> slice;
+  DenseMap<Value, Attribute> layout;
+  // Set-up the conversion "cache"
+  auto getExistingConversion = [this](OpOperand &value, Attribute encoding) {
+    return this->getExistingConversion(value, encoding);
+  };
+  LogicalResult result = getConvertBackwardSlice(
+      convertOp.getSrcMutable(), slice, targetType.getEncoding(), layout, stop,
+      getExistingConversion);
+  if (result.failed())
+    return;
+
+  IRMapping mapping;
+  OpBuilder builder(convertOp.getContext());
+  SetVector<Value> innerSlice;
+  for (Value v : slice) {
+    auto loadOp = dyn_cast<LoadOp>(v.getDefiningOp());
+    if (!loadOp) {
+      auto op = v.getDefiningOp();
+      if (op && (isa<arith::ConstantOp>(op) || noDataMovement(op))) {
+        innerSlice.insert(v);
+        continue;
+      } else {
+        LLVM_DEBUG({
+          DBGS() << "  Leaves must be Load or Constant. Got " << v << "\n";
+        });
+        return;
+      }
+    }
+    builder.setInsertionPointAfter(loadOp);
+    auto type = dyn_cast<RankedTensorType>(loadOp.getType());
+    if (!type)
+      continue;
+    auto newType = RankedTensorType::get(type.getShape(), type.getElementType(),
+                                         layout[loadOp]);
+    auto newConvertOp = builder.create<ConvertLayoutOp>(
+        convertOp.getLoc(), newType, loadOp.getResult());
+    mapping.map(loadOp.getResult(), newConvertOp.getResult());
+  }
+
+  if (innerSlice.empty()) {
+    return;
+  }
+
+  LLVM_DEBUG({
+    DBGS() << "  Hoisting " << convertOp << '\n';
+    for (Value v : innerSlice)
+      DBGS() << "    " << v << '\n';
+  });
+
+  // 2. Rewrite the nonDataMovement nodes of the slice
+  rewriteSlice(innerSlice, layout, convertOp, mapping);
+}
+
 // For convert left we try to hoist them above type extension to reduce the cost
 // of the convert.
 void LayoutRematerialization::hoistConvertOnTopOfExtOrBroadcast(
     ConvertLayoutOp convertOp) {
-  // we don't handle conversions to DotOperandEncodingAttr
-  // this is a heuristics to accommodate fused attention
+  // DotOperand is Hoisted by hoistDotOperandOnTopOfMovFree
   RankedTensorType targetType = convertOp.getType();
   if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
     return;
@@ -1182,7 +1278,6 @@ void LayoutRematerialization::hoistConvertIntoConditionals(
 
   // Find conditional edges above which the conversion can be hoisted.
   SmallVector<std::pair<Value, OpOperand *>> hoistAbove;
-  unsigned sliceSize = slice.size();
   // The routine will recurse through backward slices, e.g. to handle loops and
   // conditional chains. Thus, we re-query the size of `slice`.
   for (unsigned i = 0; i < slice.size(); i++) {
@@ -1280,6 +1375,10 @@ void hoistConvert(ModuleOp module) {
 
     layoutRemat = LayoutRematerialization(funcOp);
     layoutRemat.hoistConvertIntoConditionals();
+    layoutRemat.cleanup();
+
+    layoutRemat = LayoutRematerialization(funcOp);
+    layoutRemat.hoistConvertDotOperand();
     layoutRemat.cleanup();
   });
 }
