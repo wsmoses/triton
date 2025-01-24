@@ -142,6 +142,12 @@ public:
   void rewriteSlice(SetVector<Value> &slice, DenseMap<Value, Attribute> &layout,
                     ConvertLayoutOp convertOp);
 
+  LogicalResult
+  getConvertBackwardSlice(OpOperand &root, Attribute rootEncoding,
+                          SetVector<Value> &slice,
+                          DenseMap<Value, Attribute> &layout,
+                          std::function<bool(Operation *)> stopPropagation);
+
   LogicalResult getRematerializableSlice(
       OpOperand &root, Attribute rootEncoding, SetVector<Value> &slice,
       DenseMap<Value, Attribute> &layout,
@@ -149,10 +155,6 @@ public:
 
 private:
   void updateRematMapping(SmallVector<std::tuple<Value, Value>> &values);
-  // Allow re-using existing conversions for a value. Check dominance of any
-  // reusable materializations against the root value. This is sufficient
-  // because the conversions are processed in post-order.
-  Value getExistingConversion(OpOperand &value, Attribute encoding);
 
   // Existing tuples of (value, layout) that needs to be updated when recreating
   // scf ops. This prevents keeping track of Values that have been delete when
@@ -955,38 +957,45 @@ void LayoutRematerialization::rewriteSlice(SetVector<Value> &slice,
   IRMapping mapping;
   rewriteSlice(slice, layout, convertOp, mapping);
 }
-Value LayoutRematerialization::getExistingConversion(OpOperand &value,
-                                                     Attribute encoding) {
-  Value remat = getRematValue(value.get(), encoding);
-  if (!remat)
+
+LogicalResult LayoutRematerialization::getConvertBackwardSlice(
+    OpOperand &root, Attribute rootEncoding, SetVector<Value> &slice,
+    DenseMap<Value, Attribute> &layout,
+    std::function<bool(Operation *)> stopPropagation) {
+  // Allow re-using existing conversions for a value. Check dominance of any
+  // reusable materializations against the root value. This is sufficient
+  // because the conversions are processed in post-order.
+  auto getExistingConversion = [&](OpOperand &value, Attribute encoding) {
+    Value remat = getRematValue(value.get(), encoding);
+    if (!remat)
+      return Value();
+    // `value` can be replaced with an existing rematerialization if it
+    // dominates the current use of value.
+    Operation *user = value.getOwner();
+    if (domInfo.properlyDominates(remat, user)) {
+      return remat;
+    }
+    // Alternatively, if the current use can be sunk below the existing
+    // rematerialization, then it is okay to use as well. E.g. the current use
+    // is a conversion that will be folded away when its result is
+    // rematerialized.
+    if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
+        domInfo.properlyDominates(user, remat.getDefiningOp())) {
+      return remat;
+    }
     return Value();
-  // `value` can be replaced with an existing rematerialization if it
-  // dominates the current use of value.
-  Operation *user = value.getOwner();
-  if (domInfo.properlyDominates(remat, user)) {
-    return remat;
-  }
-  // Alternatively, if the current use can be sunk below the existing
-  // rematerialization, then it is okay to use as well. E.g. the current use
-  // is a conversion that will be folded away when its result is
-  // rematerialized.
-  if (isa<ConvertLayoutOp>(user) && remat.getDefiningOp() &&
-      domInfo.properlyDominates(user, remat.getDefiningOp())) {
-    return remat;
-  }
-  return Value();
-};
+  };
+
+  return mlir::getConvertBackwardSlice(root, slice, rootEncoding, layout,
+                                       stopPropagation, getExistingConversion);
+}
 
 LogicalResult LayoutRematerialization::getRematerializableSlice(
     OpOperand &root, Attribute rootEncoding, SetVector<Value> &slice,
     DenseMap<Value, Attribute> &layout,
     std::function<bool(Operation *)> stopPropagation) {
-  auto getExistingConversion = [this](OpOperand &value, Attribute encoding) {
-    return this->getExistingConversion(value, encoding);
-  };
-  LogicalResult result =
-      getConvertBackwardSlice(root, slice, rootEncoding, layout,
-                              stopPropagation, getExistingConversion);
+  LogicalResult result = getConvertBackwardSlice(root, rootEncoding, slice,
+                                                 layout, stopPropagation);
   if (result.failed() || slice.empty())
     return failure();
 
@@ -1125,12 +1134,8 @@ void LayoutRematerialization::hoistConvertDotOperand(
   SetVector<Value> slice;
   DenseMap<Value, Attribute> layout;
   // Set-up the conversion "cache"
-  auto getExistingConversion = [this](OpOperand &value, Attribute encoding) {
-    return this->getExistingConversion(value, encoding);
-  };
   LogicalResult result = getConvertBackwardSlice(
-      convertOp.getSrcMutable(), slice, targetType.getEncoding(), layout, stop,
-      getExistingConversion);
+      convertOp.getSrcMutable(), targetType.getEncoding(), slice, layout, stop);
   if (result.failed())
     return;
 
@@ -1139,9 +1144,11 @@ void LayoutRematerialization::hoistConvertDotOperand(
   SetVector<Value> innerSlice;
   for (Value v : slice) {
     auto loadOp = dyn_cast<LoadOp>(v.getDefiningOp());
+    // We expect the leaves of the slice to be Load or arith::Constant
+    // This could be generalised if necessary
     if (!loadOp) {
       auto op = v.getDefiningOp();
-      if (op && (isa<arith::ConstantOp>(op) || noDataMovement(op))) {
+      if (isa<arith::ConstantOp>(op) || noDataMovement(op)) {
         innerSlice.insert(v);
         continue;
       } else {
@@ -1172,7 +1179,6 @@ void LayoutRematerialization::hoistConvertDotOperand(
       DBGS() << "    " << v << '\n';
   });
 
-  // 2. Rewrite the nonDataMovement nodes of the slice
   rewriteSlice(innerSlice, layout, convertOp, mapping);
 }
 
