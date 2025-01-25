@@ -1116,7 +1116,9 @@ void LayoutRematerialization::hoistConvertDotOperand() {
 void LayoutRematerialization::hoistConvertDotOperand(
     ConvertLayoutOp convertOp) {
   auto targetType = convertOp.getType();
-  if (!isa<DotOperandEncodingAttr>(targetType.getEncoding()))
+  // The pass is targeted to Nvidia mma/wgmma dot operands
+  auto dotEnc = dyn_cast<DotOperandEncodingAttr>(targetType.getEncoding());
+  if (!(dotEnc && isa<NvidiaMmaEncodingAttr>(dotEnc.getParent())))
     return;
 
   // We hoist over any operation that can be done without data movement between
