@@ -1130,7 +1130,8 @@ void LayoutRematerialization::hoistConvertDotOperand(
   // https://github.com/triton-lang/triton/pull/5475 lands
   auto noDataMovement = [](Operation *op) {
     return (op->hasTrait<OpTrait::Elementwise>() && isPure(op)) ||
-           isa<BroadcastOp, ExpandDimsOp, ReshapeOp, TransOp, UpcastMXFPOp>(op);
+           isa<BroadcastOp, ExpandDimsOp, ReshapeOp, TransOp, UpcastMXFPOp,
+               ConvertLayoutOp>(op);
   };
   // Stop the slice as soon as we find an operation that cannot be done without
   // data movement between threads
