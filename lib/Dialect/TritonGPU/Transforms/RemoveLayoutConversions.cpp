@@ -155,7 +155,6 @@ public:
 
 private:
   void updateRematMapping(SmallVector<std::tuple<Value, Value>> &values);
-
   // Existing tuples of (value, layout) that needs to be updated when recreating
   // scf ops. This prevents keeping track of Values that have been delete when
   // rewriting slices.
@@ -1059,7 +1058,7 @@ void LayoutRematerialization::hoistConvertIntoConditionals() {
 
 void LayoutRematerialization::backwardRematerialization(
     ConvertLayoutOp convertOp) {
-  // DotOperand is Hoisted by hoistDotOperandOnTopOfMovFree
+  // DotOperand is hoisted by hoistDotOperand
   RankedTensorType targetType = convertOp.getType();
   if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
     return;
@@ -1117,6 +1116,10 @@ void LayoutRematerialization::hoistConvertDotOperand(
     ConvertLayoutOp convertOp) {
   auto targetType = convertOp.getType();
   // The pass is targeted to Nvidia mma/wgmma dot operands
+  // We move convert #dot_operand next to their loads. This is done
+  // so that it's then easy to pipeline these loads
+  // TODO: Perhaps we should do this whenever convertOp is within a loop
+
   auto dotEnc = dyn_cast<DotOperandEncodingAttr>(targetType.getEncoding());
   if (!(dotEnc && isa<NvidiaMmaEncodingAttr>(dotEnc.getParent())))
     return;
@@ -1193,7 +1196,7 @@ void LayoutRematerialization::hoistConvertDotOperand(
 // of the convert.
 void LayoutRematerialization::hoistConvertOnTopOfExtOrBroadcast(
     ConvertLayoutOp convertOp) {
-  // DotOperand is Hoisted by hoistDotOperandOnTopOfMovFree
+  // DotOperand is hoisted by hoistDotOperand
   RankedTensorType targetType = convertOp.getType();
   if (isa<DotOperandEncodingAttr>(targetType.getEncoding()))
     return;
