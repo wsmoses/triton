@@ -700,7 +700,7 @@ LogicalResult ReshapeOp::canonicalize(ReshapeOp op, PatternRewriter &rewriter) {
 }
 
 OpFoldResult ReshapeOp::fold(FoldAdaptor adaptor) {
-  if (getType() == getSrc().getType() && !getAllowReorder()) {
+  if (getType() == getSrc().getType()) {
     // no-op
     return getSrc();
   }
@@ -1056,6 +1056,12 @@ void ElementwiseInlineAsmOp::getEffects(
                        SideEffects::DefaultResource::get());
   effects.emplace_back(MemoryEffects::Read::get(),
                        SideEffects::DefaultResource::get());
+}
+
+Speculation::Speculatability ElementwiseInlineAsmOp::getSpeculatability() {
+  if (getPure())
+    return Speculation::Speculatable;
+  return Speculation::NotSpeculatable;
 }
 
 LogicalResult ElementwiseInlineAsmOp::verify() {
