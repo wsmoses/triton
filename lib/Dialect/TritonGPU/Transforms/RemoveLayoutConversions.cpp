@@ -1145,6 +1145,11 @@ void LayoutRematerialization::hoistConvertDotOperand(
   OpBuilder builder(convertOp.getContext());
   SetVector<Value> innerSlice;
   for (Value v : slice) {
+    if (!v.getDefiningOp()) {
+      LLVM_DEBUG(
+          { DBGS() << "  Block arguments not supported. Got " << v << "\n"; });
+      return;
+    }
     auto loadOp = dyn_cast<LoadOp>(v.getDefiningOp());
     // We expect the leaves of the slice to be Load or arith::Constant
     // This could be generalised if necessary
